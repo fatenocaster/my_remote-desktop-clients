@@ -213,3 +213,5 @@ remote-desktop-clients-libs-*
 
 venv
 !.github/workflows/build-*
+keystore.properties
+*.keystore

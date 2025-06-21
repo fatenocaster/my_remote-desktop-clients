@@ -109,6 +109,21 @@ jobs:
     # 第十二步：构建发布版本APK
     - name: Build Release APK
       run: |
+        # 创建密钥库配置文件（如果不存在）
+        if [ ! -f "keystore.properties" ]; then
+          echo "创建临时密钥库配置..."
+          echo "storeFile=aRDP-release-key.keystore" > keystore.properties
+          echo "storePassword=android123" >> keystore.properties
+          echo "keyAlias=aRDP" >> keystore.properties
+          echo "keyPassword=android123" >> keystore.properties
+        fi
+        
+        # 如果密钥库不存在，创建一个临时的
+        if [ ! -f "aRDP-release-key.keystore" ]; then
+          echo "创建临时密钥库..."
+          keytool -genkey -v -keystore aRDP-release-key.keystore -alias aRDP -keyalg RSA -keysize 2048 -validity 10000 -storepass android123 -keypass android123 -dname "CN=aRDP,OU=Development,O=aRDP,L=City,S=State,C=CN"
+        fi
+        
         ./gradlew :aRDP-app:assembleRelease --stacktrace --info
       env:
         ANDROID_HOME: ${{ env.ANDROID_HOME }}
