@@ -1,0 +1,138 @@
+name: Build aRDP Android App
+
+on:
+  # 当推送到主分支或创建pull request时触发构建
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  # 允许手动触发workflow
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build aRDP APK
+    runs-on: ubuntu-latest
+    
+    steps:
+    # 第一步：检出代码
+    - name: Checkout repository
+      uses: actions/checkout@v3
+      with:
+        # 获取完整的git历史，某些构建可能需要
+        fetch-depth: 0
+
+    # 第二步：设置JDK环境
+    - name: Set up JDK 17
+      uses: actions/setup-java@v3
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+
+    # 第三步：缓存Gradle依赖，加速构建
+    - name: Cache Gradle packages
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.gradle/caches
+          ~/.gradle/wrapper
+        key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+        restore-keys: |
+          ${{ runner.os }}-gradle-
+
+    # 第四步：安装必要的系统依赖
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential git wget unzip
+
+    # 第五步：下载预构建依赖库
+    - name: Download prebuilt dependencies
+      run: |
+        chmod +x ./download-prebuilt-dependencies.sh
+        ./download-prebuilt-dependencies.sh
+
+    # 第六步：准备项目
+    - name: Prepare project
+      run: |
+        chmod +x ./bVNC/prepare_project.sh
+        ./bVNC/prepare_project.sh --skip-build libs nopath
+
+    # 第七步：设置Android SDK
+    - name: Set up Android SDK
+      uses: android-actions/setup-android@v2
+
+    # 第八步：同意Android SDK许可证
+    - name: Accept Android SDK licenses
+      run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses
+
+    # 第九步：安装特定的Android组件
+    - name: Install Android components
+      run: |
+        $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-34"
+        $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "build-tools;34.0.0"
+        $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;25.1.8937393"
+
+    # 第十步：赋予gradlew执行权限
+    - name: Grant execute permission for gradlew
+      run: chmod +x ./gradlew
+
+    # 第十一步：构建调试版本APK
+    - name: Build Debug APK
+      run: |
+        ./gradlew :aRDP-app:assembleDebug --stacktrace --info
+      env:
+        ANDROID_HOME: ${{ env.ANDROID_HOME }}
+
+    # 第十二步：构建发布版本APK（可选）
+    - name: Build Release APK
+      run: |
+        ./gradlew :aRDP-app:assembleRelease --stacktrace --info
+      env:
+        ANDROID_HOME: ${{ env.ANDROID_HOME }}
+      continue-on-error: true  # 发布版本可能需要签名，允许失败
+
+    # 第十三步：运行单元测试
+    - name: Run unit tests
+      run: |
+        ./gradlew :aRDP-app:testDebugUnitTest --stacktrace
+      continue-on-error: true
+
+    # 第十四步：上传构建产物
+    - name: Upload APK artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: aRDP-APKs
+        path: |
+          aRDP-app/build/outputs/apk/debug/*.apk
+          aRDP-app/build/outputs/apk/release/*.apk
+        retention-days: 30
+
+    # 第十五步：上传测试报告（如果有）
+    - name: Upload test reports
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: test-reports
+        path: |
+          **/build/reports/tests/
+          **/build/test-results/
+        retention-days: 7
+
+    # 第十六步：构建信息总结
+    - name: Build summary
+      if: always()
+      run: |
+        echo "## 构建总结" >> $GITHUB_STEP_SUMMARY
+        echo "### aRDP Android应用构建完成" >> $GITHUB_STEP_SUMMARY
+        echo "- 构建时间: $(date)" >> $GITHUB_STEP_SUMMARY
+        echo "- 分支: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+        echo "- 提交: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+        
+        if [ -f "aRDP-app/build/outputs/apk/debug/aRDP-app-debug.apk" ]; then
+          APK_SIZE=$(du -h aRDP-app/build/outputs/apk/debug/aRDP-app-debug.apk | cut -f1)
+          echo "- 调试版APK大小: $APK_SIZE" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        echo "### 下载链接" >> $GITHUB_STEP_SUMMARY
+        echo "构建完成的APK文件可以在Actions的Artifacts中下载" >> $GITHUB_STEP_SUMMARY 

@@ -212,3 +212,4 @@ switch-to-*
 remote-desktop-clients-libs-*
 
 venv
+!.github/workflows/build-*
