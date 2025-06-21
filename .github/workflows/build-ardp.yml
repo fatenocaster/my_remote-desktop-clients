@@ -4,15 +4,36 @@ on:
   # 当推送到主分支或创建pull request时触发构建
   push:
     branches: [ main, master ]
+    tags: [ 'v*' ]  # 当推送标签时也触发构建
   pull_request:
     branches: [ main, master ]
   # 允许手动触发workflow
   workflow_dispatch:
+    inputs:
+      build_debug:
+        description: '是否构建Debug版本'
+        required: false
+        default: false
+        type: boolean
+      create_release:
+        description: '是否创建Release（仅在push标签时有效）'
+        required: false
+        default: true
+        type: boolean
+
+# 设置环境变量，方便控制构建行为
+env:
+  BUILD_DEBUG: ${{ github.event.inputs.build_debug || 'false' }}
+  CREATE_RELEASE: ${{ github.event.inputs.create_release || 'true' }}
 
 jobs:
   build:
     name: Build aRDP APK
     runs-on: ubuntu-latest
+    
+    outputs:
+      release_apk_path: ${{ steps.get_apk_path.outputs.release_apk_path }}
+      apk_version: ${{ steps.get_version.outputs.version }}
     
     steps:
     # 第一步：检出代码
@@ -77,43 +98,76 @@ jobs:
     - name: Grant execute permission for gradlew
       run: chmod +x ./gradlew
 
-    # 第十一步：构建调试版本APK
+    # 第十一步：构建调试版本APK（可选，通过环境变量控制）
     - name: Build Debug APK
+      if: env.BUILD_DEBUG == 'true'
       run: |
         ./gradlew :aRDP-app:assembleDebug --stacktrace --info
       env:
         ANDROID_HOME: ${{ env.ANDROID_HOME }}
 
-    # 第十二步：构建发布版本APK（可选）
+    # 第十二步：构建发布版本APK
     - name: Build Release APK
       run: |
         ./gradlew :aRDP-app:assembleRelease --stacktrace --info
       env:
         ANDROID_HOME: ${{ env.ANDROID_HOME }}
-      continue-on-error: true  # 发布版本可能需要签名，允许失败
 
-    # 第十三步：运行单元测试
+    # 获取版本信息
+    - name: Get version info
+      id: get_version
+      run: |
+        if [ "${{ github.ref_type }}" == "tag" ]; then
+          VERSION="${{ github.ref_name }}"
+        else
+          VERSION="v$(date +'%Y%m%d')-$(echo ${{ github.sha }} | cut -c1-7)"
+        fi
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "构建版本: $VERSION"
+
+    # 获取APK文件路径
+    - name: Get APK paths
+      id: get_apk_path
+      run: |
+        RELEASE_APK=$(find aRDP-app/build/outputs/apk/release -name "*.apk" | head -1)
+        echo "release_apk_path=$RELEASE_APK" >> $GITHUB_OUTPUT
+        echo "发布版APK路径: $RELEASE_APK"
+        
+        if [ "${{ env.BUILD_DEBUG }}" == "true" ]; then
+          DEBUG_APK=$(find aRDP-app/build/outputs/apk/debug -name "*.apk" | head -1)
+          echo "debug_apk_path=$DEBUG_APK" >> $GITHUB_OUTPUT
+          echo "调试版APK路径: $DEBUG_APK"
+        fi
+
+    # 第十三步：运行单元测试（仅在构建Debug版本时运行）
     - name: Run unit tests
+      if: env.BUILD_DEBUG == 'true'
       run: |
         ./gradlew :aRDP-app:testDebugUnitTest --stacktrace
       continue-on-error: true
 
-    # 第十四步：上传构建产物
-    - name: Upload APK artifacts
+    # 第十四步：上传构建产物到Artifacts
+    - name: Upload Debug APK artifacts
+      if: env.BUILD_DEBUG == 'true'
       uses: actions/upload-artifact@v4
       with:
-        name: aRDP-APKs
-        path: |
-          aRDP-app/build/outputs/apk/debug/*.apk
-          aRDP-app/build/outputs/apk/release/*.apk
+        name: aRDP-Debug-APK-${{ steps.get_version.outputs.version }}
+        path: aRDP-app/build/outputs/apk/debug/*.apk
+        retention-days: 7
+
+    - name: Upload Release APK artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: aRDP-Release-APK-${{ steps.get_version.outputs.version }}
+        path: aRDP-app/build/outputs/apk/release/*.apk
         retention-days: 30
 
     # 第十五步：上传测试报告（如果有）
     - name: Upload test reports
+      if: env.BUILD_DEBUG == 'true'
       uses: actions/upload-artifact@v4
-      if: always()
       with:
-        name: test-reports
+        name: test-reports-${{ steps.get_version.outputs.version }}
         path: |
           **/build/reports/tests/
           **/build/test-results/
@@ -126,13 +180,136 @@ jobs:
         echo "## 构建总结" >> $GITHUB_STEP_SUMMARY
         echo "### aRDP Android应用构建完成" >> $GITHUB_STEP_SUMMARY
         echo "- 构建时间: $(date)" >> $GITHUB_STEP_SUMMARY
+        echo "- 版本: ${{ steps.get_version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
         echo "- 分支: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
         echo "- 提交: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+        echo "- 构建Debug版本: ${{ env.BUILD_DEBUG }}" >> $GITHUB_STEP_SUMMARY
         
-        if [ -f "aRDP-app/build/outputs/apk/debug/aRDP-app-debug.apk" ]; then
-          APK_SIZE=$(du -h aRDP-app/build/outputs/apk/debug/aRDP-app-debug.apk | cut -f1)
-          echo "- 调试版APK大小: $APK_SIZE" >> $GITHUB_STEP_SUMMARY
+        if [ -f "${{ steps.get_apk_path.outputs.release_apk_path }}" ]; then
+          APK_SIZE=$(du -h "${{ steps.get_apk_path.outputs.release_apk_path }}" | cut -f1)
+          echo "- 发布版APK大小: $APK_SIZE" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        if [ "${{ env.BUILD_DEBUG }}" == "true" ] && [ -f "${{ steps.get_apk_path.outputs.debug_apk_path }}" ]; then
+          DEBUG_APK_SIZE=$(du -h "${{ steps.get_apk_path.outputs.debug_apk_path }}" | cut -f1)
+          echo "- 调试版APK大小: $DEBUG_APK_SIZE" >> $GITHUB_STEP_SUMMARY
         fi
         
         echo "### 下载链接" >> $GITHUB_STEP_SUMMARY
-        echo "构建完成的APK文件可以在Actions的Artifacts中下载" >> $GITHUB_STEP_SUMMARY 
+        if [ "${{ github.ref_type }}" == "tag" ] && [ "${{ env.CREATE_RELEASE }}" == "true" ]; then
+          echo "构建完成的APK文件将自动发布到GitHub Release" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "构建完成的APK文件可以在Actions的Artifacts中下载" >> $GITHUB_STEP_SUMMARY
+        fi
+
+  # 新增：创建Release并上传APK文件
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    # 只有在推送标签且启用创建Release时才运行
+    if: github.ref_type == 'tag' && needs.build.result == 'success' && (github.event.inputs.create_release == 'true' || github.event.inputs.create_release == '')
+    
+    permissions:
+      contents: write  # 需要写权限来创建release
+    
+    steps:
+    - name: Download Release APK
+      uses: actions/download-artifact@v4
+      with:
+        name: aRDP-Release-APK-${{ needs.build.outputs.apk_version }}
+        path: ./release-apks
+
+    - name: Download Debug APK (if built)
+      if: env.BUILD_DEBUG == 'true'
+      uses: actions/download-artifact@v4
+      with:
+        name: aRDP-Debug-APK-${{ needs.build.outputs.apk_version }}
+        path: ./debug-apks
+
+    - name: Prepare release files
+      run: |
+        mkdir -p release-files
+        
+        # 复制并重命名发布版APK
+        if [ -f "./release-apks/aRDP-app-release.apk" ]; then
+          cp "./release-apks/aRDP-app-release.apk" "./release-files/aRDP-${{ needs.build.outputs.apk_version }}-release.apk"
+        else
+          # 如果文件名不同，查找第一个APK文件
+          RELEASE_APK=$(find ./release-apks -name "*.apk" | head -1)
+          if [ -n "$RELEASE_APK" ]; then
+            cp "$RELEASE_APK" "./release-files/aRDP-${{ needs.build.outputs.apk_version }}-release.apk"
+          fi
+        fi
+        
+        # 如果构建了Debug版本，也包含进来
+        if [ "${{ env.BUILD_DEBUG }}" == "true" ] && [ -d "./debug-apks" ]; then
+          if [ -f "./debug-apks/aRDP-app-debug.apk" ]; then
+            cp "./debug-apks/aRDP-app-debug.apk" "./release-files/aRDP-${{ needs.build.outputs.apk_version }}-debug.apk"
+          else
+            DEBUG_APK=$(find ./debug-apks -name "*.apk" | head -1)
+            if [ -n "$DEBUG_APK" ]; then
+              cp "$DEBUG_APK" "./release-files/aRDP-${{ needs.build.outputs.apk_version }}-debug.apk"
+            fi
+          fi
+        fi
+        
+        # 显示准备发布的文件
+        echo "准备发布的文件："
+        ls -la ./release-files/
+
+    - name: Generate release notes
+      run: |
+        cat > release-notes.md << EOF
+        # aRDP Android客户端 ${{ needs.build.outputs.apk_version }}
+        
+        ## 📱 APK下载
+        
+        - **aRDP-${{ needs.build.outputs.apk_version }}-release.apk**: 发布版本（推荐）
+        $(if [ "${{ env.BUILD_DEBUG }}" == "true" ]; then echo "- **aRDP-${{ needs.build.outputs.apk_version }}-debug.apk**: 调试版本"; fi)
+        
+        ## 🔧 构建信息
+        
+        - 构建时间: $(date -u +'%Y-%m-%d %H:%M:%S UTC')
+        - 提交哈希: ${{ github.sha }}
+        - 分支: ${{ github.ref_name }}
+        
+        ## 📋 安装说明
+        
+        1. 下载适合的APK文件
+        2. 在Android设备上启用"未知来源"安装
+        3. 安装下载的APK文件
+        
+        ## ⚠️ 注意事项
+        
+        - 发布版本已经过优化，适合日常使用
+        - 如果遇到问题，请在GitHub Issues中反馈
+        
+        ---
+        
+        > 此版本通过GitHub Actions自动构建和发布
+        EOF
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ github.ref_name }}
+        name: aRDP ${{ needs.build.outputs.apk_version }}
+        body_path: release-notes.md
+        files: |
+          release-files/*.apk
+        draft: false
+        prerelease: ${{ contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') || contains(github.ref_name, 'rc') }}
+        generate_release_notes: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Release summary
+      run: |
+        echo "## 🎉 Release创建成功!" >> $GITHUB_STEP_SUMMARY
+        echo "### 📦 发布信息" >> $GITHUB_STEP_SUMMARY
+        echo "- 版本: ${{ needs.build.outputs.apk_version }}" >> $GITHUB_STEP_SUMMARY
+        echo "- 标签: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+        echo "- 发布链接: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+        echo "### 📁 发布文件" >> $GITHUB_STEP_SUMMARY
+        echo "$(ls -la ./release-files/ | grep -E '\.apk$' | awk '{print "- " $9}')" >> $GITHUB_STEP_SUMMARY 
