@@ -112,7 +112,7 @@ jobs:
         # 创建密钥库配置文件（如果不存在）
         if [ ! -f "keystore.properties" ]; then
           echo "创建临时密钥库配置..."
-          echo "storeFile=aRDP-release-key.keystore" > keystore.properties
+          echo "storeFile=../aRDP-release-key.keystore" > keystore.properties
           echo "storePassword=android123" >> keystore.properties
           echo "keyAlias=aRDP" >> keystore.properties
           echo "keyPassword=android123" >> keystore.properties
